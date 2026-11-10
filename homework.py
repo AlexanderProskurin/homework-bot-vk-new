@@ -3,8 +3,11 @@ import os
 import sys
 import time
 
+from http import HTTPStatus
+
 import requests
 from dotenv import load_dotenv
+from exceptions import UnexpectedAPIStatusError
 
 import vk_api
 
@@ -26,45 +29,93 @@ HOMEWORK_VERDICTS = {
 
 logging.basicConfig(
     level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
+    format=(
+        '%(asctime)s [%(levelname)s] '
+        '%(funcName)s:%(lineno)d - %(message)s'
+    ),
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(
+            __file__ + '.log',
+            encoding='utf-8'
+        )
+    ]
 )
 
 
 def check_tokens():
     """Проверить наличие обязательных переменных окружения."""
-    tokens = (PRACTICUM_TOKEN, VK_TOKEN, VK_USER_ID)
-    return all(tokens)
+    tokens = (
+        ('PRACTICUM_TOKEN', PRACTICUM_TOKEN),
+        ('VK_TOKEN', VK_TOKEN),
+        ('VK_USER_ID', VK_USER_ID)
+    )
+
+    missing_tokens = []
+
+    for name, value in tokens:
+        if not value:
+            missing_tokens.append(name)
+
+    if missing_tokens:
+        message = (
+            'Отсутствуют обязательные переменные окружения: '
+            + ', '.join(missing_tokens)
+        )
+        logging.critical(message)
+        raise RuntimeError(message)
+
+    return True
 
 
 def send_message(vk, message):
-    """Отправить сообщение пользователю VK."""
-    vk.messages.send(
-        user_id=VK_USER_ID,
-        message=message,
-        random_id=0
-    )
+    """Отправить сообщение в VK и вернуть результат отправки."""
+    try:
+        vk.messages.send(
+            user_id=VK_USER_ID,
+            message=message,
+            random_id=0
+        )
+    except Exception as error:
+        logging.error(
+            'Ошибка отправки сообщения в VK: %s',
+            error
+        )
+        return False
+
     logging.debug('Сообщение успешно отправлено в VK.')
+    return True
 
 
 def get_api_answer(timestamp):
     """Получить ответ от API Практикума."""
+    request_params = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': {'from_date': timestamp},
+        'timeout': 10
+    }
+
+    logging.debug(
+        'Запрос к API: %s, from_date=%s',
+        request_params['url'],
+        timestamp
+    )
+
     try:
-        response = requests.get(
-            ENDPOINT,
-            headers=HEADERS,
-            params={'from_date': timestamp},
-            timeout=10
-        )
+        response = requests.get(**request_params)
     except requests.RequestException as error:
         raise ConnectionError(
-            f'Ошибка при запросе к API Практикума: {error}'
+            f'Ошибка запроса к {ENDPOINT}, '
+            f'from_date={timestamp}: {error}'
         ) from error
 
-    if response.status_code != 200:
-        raise RuntimeError(
+    if response.status_code != HTTPStatus.OK:
+        raise UnexpectedAPIStatusError(
             f'Эндпоинт {ENDPOINT} недоступен. '
-            f'Код ответа API: {response.status_code}'
+            f'Код: {response.status_code}. '
+            f'Причина: {response.reason}. '
+            f'Ответ: {response.text}'
         )
 
     return response.json()
@@ -77,9 +128,6 @@ def check_response(response):
 
     if 'homeworks' not in response:
         raise KeyError('В ответе API отсутствует ключ homeworks.')
-
-    if 'current_date' not in response:
-        raise KeyError('В ответе API отсутствует ключ current_date.')
 
     homeworks = response['homeworks']
 
@@ -101,34 +149,16 @@ def parse_status(homework):
     status = homework['status']
 
     if status not in HOMEWORK_VERDICTS:
-        raise ValueError(f'Неизвестный статус домашней работы: {status}')
+        raise ValueError(f'Неожиданный статус домашней работы: {status}')
 
     verdict = HOMEWORK_VERDICTS[status]
 
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
 
-def safe_send_message(vk, message):
-    """Отправить сообщение в VK с обработкой ошибок."""
-    try:
-        send_message(vk, message)
-    except Exception as error:
-        logging.error(
-            'Не удалось отправить сообщение в VK: %s',
-            error
-        )
-        return False
-    return True
-
-
 def main():
     """Управлять работой бота и проверкой статусов домашних работ."""
-    if not check_tokens():
-        logging.critical(
-            'Отсутствует обязательная переменная окружения. '
-            'Программа остановлена.'
-        )
-        return
+    check_tokens()
 
     logging.info('Бот запущен.')
 
@@ -136,35 +166,35 @@ def main():
     vk = vk_session.get_api()
 
     timestamp = int(time.time())
-    last_status_message = None
-    last_error_message = None
+    last_message = ''
 
     while True:
         try:
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
 
-            if homeworks:
-                message = parse_status(homeworks[0])
+            timestamp = response.get('current_date', timestamp)
 
-                if message != last_status_message:
-                    if safe_send_message(vk, message):
-                        last_status_message = message
-            else:
+            if not homeworks:
                 logging.debug('Новых статусов домашних работ нет.')
+                continue
 
-            timestamp = response['current_date']
-            last_error_message = None
+            message = parse_status(homeworks[0])
+
+            if message != last_message:
+                if send_message(vk, message):
+                    last_message = message
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
             logging.error(message)
 
-            if message != last_error_message:
-                if safe_send_message(vk, message):
-                    last_error_message = message
+            if message != last_message:
+                if send_message(vk, message):
+                    last_message = message
 
-        time.sleep(RETRY_PERIOD)
+        finally:
+            time.sleep(RETRY_PERIOD)
 
 
 if __name__ == '__main__':
