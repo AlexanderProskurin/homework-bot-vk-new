@@ -182,7 +182,6 @@ def main():
 
             if message != last_message and send_message(vk, message):
                 last_message = message
-                timestamp = response.get('current_date', timestamp)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
