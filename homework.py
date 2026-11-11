@@ -2,7 +2,6 @@ import logging
 import os
 import sys
 import time
-
 from http import HTTPStatus
 
 import requests
@@ -65,8 +64,6 @@ def check_tokens():
         logging.critical(message)
         raise RuntimeError(message)
 
-    return True
-
 
 def send_message(vk, message):
     """Отправить сообщение в VK и вернуть результат отправки."""
@@ -96,18 +93,21 @@ def get_api_answer(timestamp):
         'timeout': 10
     }
 
-    logging.debug(
-        'Запрос к API: %s, from_date=%s',
-        request_params['url'],
-        timestamp
-    )
+    request_info = (
+        'Запрос к API: {url}, '
+        'from_date={params[from_date]}'
+    ).format(**request_params)
+
+    logging.debug(request_info)
 
     try:
         response = requests.get(**request_params)
     except requests.RequestException as error:
         raise ConnectionError(
-            f'Ошибка запроса к {ENDPOINT}, '
-            f'from_date={timestamp}: {error}'
+            (
+                'Ошибка запроса к {url}, '
+                'from_date={params[from_date]}: {error}'
+            ).format(**request_params, error=error)
         ) from error
 
     if response.status_code != HTTPStatus.OK:
@@ -173,25 +173,23 @@ def main():
             response = get_api_answer(timestamp)
             homeworks = check_response(response)
 
-            timestamp = response.get('current_date', timestamp)
-
             if not homeworks:
                 logging.debug('Новых статусов домашних работ нет.')
+                timestamp = response.get('current_date', timestamp)
                 continue
 
             message = parse_status(homeworks[0])
 
-            if message != last_message:
-                if send_message(vk, message):
-                    last_message = message
+            if message != last_message and send_message(vk, message):
+                last_message = message
+                timestamp = response.get('current_date', timestamp)
 
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            logging.error(message)
+            logging.exception(message)
 
-            if message != last_message:
-                if send_message(vk, message):
-                    last_message = message
+            if message != last_message and send_message(vk, message):
+                last_message = message
 
         finally:
             time.sleep(RETRY_PERIOD)
